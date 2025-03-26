@@ -9,6 +9,7 @@ const adminRouter = require("./src/routes/admin-routes");
 const notFound = require("./src/middlewares/notFound");
 const challengeRouter = require("./src/routes/challenge-routes");
 const categoryRouter = require("./src/routes/category-routes");
+const badgeRouter = require("./src/routes/badge-routes");
 const app = express();
 
 // Middlewares
@@ -22,7 +23,8 @@ app.use("/api", userRouter);
 app.use("/api", adminRouter);
 app.use("/api", challengeRouter);
 app.use("/api", categoryRouter);
-
+app.use("/api", badgeRouter)
+;
 //notFound
 app.use(notFound);
 // Handle errors

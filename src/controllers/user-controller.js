@@ -3,6 +3,7 @@ const fs = require("fs/promises");
 const prisma = require("../config/prisma");
 const createError = require("../utils/createError");
 const { cloudinary } = require("../config/cloudinary");
+const bcrypt = require("bcryptjs"); // เพิ่ม import bcrypt
 
 // อัปเดตโปรไฟล์
 exports.updateProfile = async (req, res, next) => {
@@ -67,20 +68,20 @@ exports.updatePassword = async (req, res, next) => {
     const { oldPassword, newPassword, confirmPassword } = req.body;
 
     if (!oldPassword || !newPassword || !confirmPassword) {
-      return createError(400, "กรุณากรอกข้อมูลให้ครบถ้วน");
+      return next(createError(400, "กรุณากรอกข้อมูลให้ครบถ้วน"));
     }
     if (newPassword !== confirmPassword) {
-      return createError(400, "รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน");
+      return next(createError(400, "รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน"));
     }
 
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     if (!user) {
-      return createError(404, "ไม่พบผู้ใช้");
+      return next(createError(404, "ไม่พบผู้ใช้"));
     }
 
     const isMatch = await bcrypt.compare(oldPassword, user.password);
     if (!isMatch) {
-      return createError(400, "รหัสผ่านเดิมไม่ถูกต้อง");
+      return next(createError(400, "รหัสผ่านเดิมไม่ถูกต้อง"));
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
@@ -100,7 +101,7 @@ exports.deleteAccount = async (req, res, next) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     if (!user) {
-      return createError(404, "ไม่พบผู้ใช้");
+      return next(createError(404, "ไม่พบผู้ใช้"));
     }
 
     await prisma.user.delete({ where: { id: req.user.id } });
@@ -123,17 +124,29 @@ exports.submitProof = async (req, res, next) => {
         .json({ message: "กรุณาอัปโหลดรูปภาพอย่างน้อย 1 รูป" });
     }
 
-    // สร้าง Array ของ URL รูปภาพ
-    const proofImages = req.files.map((file) => `/upload-pic/${file.filename}`);
+    // อัปโหลดไฟล์ไปยัง Cloudinary
+    const imageUrls = [];
+    for (const file of req.files) {
+      try {
+        const result = await cloudinary.uploader.upload(file.path, {
+          folder: "challenge_proofs",
+        });
+        imageUrls.push(result.secure_url);
+        
+        // ลบไฟล์ชั่วคราวหลังจากอัปโหลด
+        await fs.unlink(file.path);
+      } catch (error) {
+        console.error("Error uploading to Cloudinary:", error);
+      }
+    }
 
     // บันทึกข้อมูลลง Database (user_proof)
     const proof = await prisma.user_Proof.create({
       data: {
         userId: userId,
         challengeId: parseInt(challengeId),
-        proofImages: proofImages, // บันทึกเป็น Array
+        proofImages: JSON.stringify(imageUrls), // แปลงเป็น JSON string
         status: "PENDING",
-        submittedAt: new Date(),
       },
     });
 
@@ -187,6 +200,11 @@ exports.updateExpOnChallengeSuccess = async (userId, expReward) => {
     },
   });
 
+  // สร้าง Badge ถ้าผู้ใช้เลเวลอัป
+  if (level > user.level) {
+    await checkAndCreateBadge(userId, 'EXP', level);
+  }
+
   // ส่งค่า EXP ปัจจุบัน, EXP ที่ต้องใช้ไปด้วย
   return {
     currentExp: currentExp,
@@ -195,21 +213,179 @@ exports.updateExpOnChallengeSuccess = async (userId, expReward) => {
   };
 };
 
+// เพิ่มฟังก์ชันสำหรับการตรวจสอบและสร้าง Badge
+const checkAndCreateBadge = async (userId, condition, value) => {
+  try {
+    // ค้นหา Badge ที่ตรงเงื่อนไข
+    let badges = [];
+    
+    if (condition === 'EXP') {
+      // หา Badge ที่ต้องการระดับที่น้อยกว่าหรือเท่ากับระดับปัจจุบัน
+      badges = await prisma.badge.findMany({
+        where: {
+          condition: 'EXP',
+          // ตัวอย่างเช่น บนฐานข้อมูลอาจมีฟิลด์เพิ่มเติมเช่น requiredLevel
+          // WHERE requiredLevel <= value
+        }
+      });
+    } else if (condition === 'CHALLENGE_COMPLETED') {
+      // หา Badge ที่เกี่ยวกับการทำชาเลนจ์สำเร็จ
+      badges = await prisma.badge.findMany({
+        where: {
+          condition: 'CHALLENGE_COMPLETED',
+        }
+      });
+    }
+    
+    // ตรวจสอบว่ามี Badge ที่ต้องมอบให้ผู้ใช้หรือไม่
+    for (const badge of badges) {
+      // ตรวจสอบว่าผู้ใช้มี Badge นี้แล้วหรือไม่
+      const existingBadge = await prisma.user_Badge.findFirst({
+        where: {
+          userId,
+          badgeId: badge.id
+        }
+      });
+      
+      if (!existingBadge) {
+        // ถ้ายังไม่มี ให้สร้าง Badge ใหม่
+        await prisma.user_Badge.create({
+          data: {
+            userId,
+            badgeId: badge.id
+          }
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Error creating badge:", error);
+  }
+};
+
 // ฟังก์ชันดึงข้อมูล Profile และ EXP ของ User
 exports.getUserProfile = async (req, res, next) => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
-      select: { username: true, level: true, exp: true },
+      select: { 
+        id: true,
+        username: true, 
+        firstname: true,
+        lastname: true,
+        email: true,
+        profileImage: true,
+        level: true, 
+        exp: true,
+        createdAt: true,
+        userBadges: {
+          select: {
+            badge: {
+              select: {
+                id: true,
+                name: true,
+                description: true
+              }
+            },
+            earnedAt: true
+          }
+        }
+      },
     });
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
+    
+    // คำนวณ EXP ที่ต้องการเพื่อเลเวลอัป
+    const expToNextLevel = Math.floor(1000 * Math.pow(1.2, user.level - 1));
+    
+    // นับจำนวน Challenge ที่ทำสำเร็จ
+    const completedChallenges = await prisma.user_Challenge.count({
+      where: {
+        userId: req.user.id,
+        status: "COMPLETED"
+      }
+    });
 
-    res.json({ message: "User profile fetched successfully", user });
+    res.json({ 
+      message: "User profile fetched successfully", 
+      user: {
+        ...user,
+        expToNextLevel,
+        completedChallenges
+      }
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server Error" });
+  }
+};
+
+// เพิ่มฟังก์ชันดึงประวัติการทำชาเลนจ์
+exports.getUserChallengeHistory = async (req, res, next) => {
+  try {
+    const history = await prisma.user_Challenge.findMany({
+      where: { userId: req.user.id },
+      include: {
+        challenge: {
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            expReward: true
+          }
+        }
+      },
+      orderBy: { submittedAt: 'desc' }
+    });
+    
+    // จัดกลุ่มตามสถานะ
+    const grouped = {
+      completed: history.filter(c => c.status === 'COMPLETED'),
+      inProgress: history.filter(c => c.status === 'IN_PROGRESS'),
+      pending: history.filter(c => c.status === 'PENDING')
+    };
+    
+    // สถิติต่างๆ
+    const stats = {
+      total: history.length,
+      completed: grouped.completed.length,
+      inProgress: grouped.inProgress.length,
+      pending: grouped.pending.length,
+      completionRate: history.length > 0 
+        ? (grouped.completed.length / history.length * 100).toFixed(2) + '%' 
+        : '0%',
+      totalExpEarned: grouped.completed.reduce((sum, c) => sum + c.challenge.expReward, 0)
+    };
+
+    res.json({
+      message: "Challenge history fetched successfully",
+      history: grouped,
+      stats
+    });
+  } catch (error) {
+    console.error(error);
+    next(createError(500, "เกิดข้อผิดพลาดในการดึงประวัติการทำชาเลนจ์"));
+  }
+};
+
+// เพิ่มฟังก์ชันดึง Badge ทั้งหมดของผู้ใช้
+exports.getUserBadges = async (req, res, next) => {
+  try {
+    const userBadges = await prisma.user_Badge.findMany({
+      where: { userId: req.user.id },
+      include: {
+        badge: true
+      },
+      orderBy: { earnedAt: 'desc' }
+    });
+    
+    res.json({
+      message: "User badges fetched successfully",
+      badges: userBadges
+    });
+  } catch (error) {
+    console.error(error);
+    next(createError(500, "เกิดข้อผิดพลาดในการดึงข้อมูล Badge ของผู้ใช้"));
   }
 };
