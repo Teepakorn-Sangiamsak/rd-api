@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const createError = require("../utils/createError");
+const { cloudinary } = require("../config/cloudinary"); // เพิ่ม import cloudinary
 
 // สร้าง Challenge
 exports.createChallenge = async (req, res, next) => {
@@ -32,8 +33,6 @@ exports.createChallenge = async (req, res, next) => {
   }
 };
 
-
-
 // ดู Challenge ทั้งหมด
 exports.getChallenges = async (req, res, next) => {
   try {
@@ -59,8 +58,21 @@ exports.joinChallenge = async (req, res, next) => {
     const challenge = await prisma.challenge.findUnique({
       where: { id: parseInt(challengeId) },
     });
+    
     if (!challenge) {
-      return createError(404, "ไม่พบ Challenge");
+      return next(createError(404, "ไม่พบ Challenge"));
+    }
+
+    // ตรวจสอบว่าเข้าร่วมแล้วหรือยัง
+    const existingParticipation = await prisma.user_Challenge.findFirst({
+      where: {
+        userId,
+        challengeId: parseInt(challengeId)
+      }
+    });
+
+    if (existingParticipation) {
+      return next(createError(400, "คุณได้เข้าร่วม Challenge นี้แล้ว"));
     }
 
     await prisma.user_Challenge.create({
@@ -81,7 +93,7 @@ exports.joinChallenge = async (req, res, next) => {
 exports.submitChallengeProof = async (req, res, next) => {
   try {
     const { challengeId } = req.params;
-    const { userId } = req.user;
+    const userId = req.user.id;
     const files = req.files; // รับหลายรูป
 
     if (!files || files.length === 0) {
@@ -104,9 +116,17 @@ exports.submitChallengeProof = async (req, res, next) => {
       data: {
         userId: req.user.id, 
         challengeId: parseInt(challengeId),
-        proofImages: proofImages, 
+        proofImages: imageUrls, // แก้ไขใช้ imageUrls แทน proofImages
         status: "PENDING",
         submittedAt: new Date(),
+      },
+    });
+    
+    // สร้าง Admin Proof Check อัตโนมัติ
+    await prisma.admin_Proof_Check.create({
+      data: {
+        proofId: proof.id,
+        status: "PENDING",
       },
     });
 
@@ -131,7 +151,26 @@ exports.verifyProof = async (req, res, next) => {
     const proof = await prisma.user_Proof.update({
       where: { id: parseInt(proofId) },
       data: { status },
+      include: { challenge: true }
     });
+    
+    // ถ้าสถานะเป็น APPROVED ให้อัพเดต EXP ของผู้ใช้
+    if (status === "APPROVED") {
+      const { updateExpOnChallengeSuccess } = require("./user-controller");
+      await updateExpOnChallengeSuccess(proof.userId, proof.challenge.expReward);
+      
+      // อัพเดตสถานะ User Challenge เป็น COMPLETED
+      await prisma.user_Challenge.updateMany({
+        where: { 
+          userId: proof.userId,
+          challengeId: proof.challengeId
+        },
+        data: { 
+          status: "COMPLETED",
+          submittedAt: new Date()
+        }
+      });
+    }
 
     res.json({ message: "อัปเดตสถานะสำเร็จ", proof });
   } catch (error) {
@@ -159,5 +198,66 @@ exports.deleteChallenge = async (req, res, next) => {
     res.json({ message: "ลบ Challenge สำเร็จ" });
   } catch (error) {
     next(createError(500, "เกิดข้อผิดพลาดในการลบ Challenge"));
+  }
+};
+
+// เพิ่มฟังก์ชันใหม่: รับ Challenge ที่ผู้ใช้เข้าร่วม
+exports.getUserChallenges = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    
+    const userChallenges = await prisma.user_Challenge.findMany({
+      where: { userId },
+      include: {
+        challenge: {
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            expReward: true,
+            requirementType: true,
+            creator: {
+              select: { username: true }
+            }
+          }
+        }
+      }
+    });
+    
+    res.json({ 
+      message: "รายการ Challenge ที่ผู้ใช้เข้าร่วม", 
+      userChallenges 
+    });
+  } catch (error) {
+    next(createError(500, "เกิดข้อผิดพลาดในการดึงข้อมูล Challenge ของผู้ใช้"));
+  }
+};
+
+// เพิ่มฟังก์ชันใหม่: รับ Challenge ที่ผู้ใช้สร้าง
+exports.getUserCreatedChallenges = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    
+    const challenges = await prisma.challenge.findMany({
+      where: { createdBy: userId },
+      include: {
+        userChallenges: {
+          select: {
+            id: true,
+            status: true,
+            user: {
+              select: { username: true }
+            }
+          }
+        }
+      }
+    });
+    
+    res.json({ 
+      message: "รายการ Challenge ที่ผู้ใช้สร้าง", 
+      challenges 
+    });
+  } catch (error) {
+    next(createError(500, "เกิดข้อผิดพลาดในการดึงข้อมูล Challenge ที่ผู้ใช้สร้าง"));
   }
 };
