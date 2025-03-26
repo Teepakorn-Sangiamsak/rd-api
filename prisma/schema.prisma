@@ -1,0 +1,192 @@
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum ChallengeStatus {
+  PUBLIC
+  PRIVATE
+}
+
+enum RequirementType {
+  GPS
+  STEP_COUNT
+  PROOF
+}
+
+enum UserChallengeStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum ProofCheckStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum BanStatus {
+  BANNED
+  UNBANNED
+}
+
+enum BadgeCondition {
+  EXP
+  CHALLENGE_COMPLETED
+  SPECIAL_ACHIEVEMENT
+}
+
+model User {
+  id                Int                 @id @default(autoincrement())
+  username          String
+  firstname         String
+  lastname          String
+  email             String              @unique
+  password          String
+  role              UserRole            @default(USER)
+  profileImage      String?
+  level             Int                 @default(1)
+  exp               Int                 @default(0)
+  createdAt         DateTime            @default(now()) @map("created_at")
+  createdChallenges Created_Challenge[]
+  userChallenges    User_Challenge[]
+  userProofs        User_Proof[]
+  userBadges        User_Badge[]
+  bannedUser        Banned_User?
+  adminProofChecks  Admin_Proof_Check[]
+  Challenge         Challenge[]
+
+  @@map("user")
+}
+
+model Challenge {
+  id                Int                  @id @default(autoincrement())
+  name              String
+  description       String?
+  expReward         Int                  @default(100) @map("exp_reward")
+  status            ChallengeStatus      @default(PRIVATE)
+  requirementType   RequirementType?     @map("requirement_type")
+  createdAt         DateTime             @default(now()) @map("created_at")
+  createdBy         Int?                 @map("created_by")
+  createdChallenge  Created_Challenge[]
+  userChallenges    User_Challenge[]
+  challengeCategory Challenge_Category[]
+  userProofs        User_Proof[]
+  creator           User?                @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@map("challenge")
+}
+
+model Category {
+  id                Int                  @id @default(autoincrement())
+  name              String               @unique
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  challengeCategory Challenge_Category[]
+
+  @@map("category")
+}
+
+model Created_Challenge {
+  id          Int       @id @default(autoincrement())
+  userId      Int       @map("user_id")
+  challengeId Int       @map("challenge_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challenge   Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+
+  @@map("created_challenge")
+}
+
+model User_Challenge {
+  id          Int                 @id @default(autoincrement())
+  userId      Int                 @map("user_id")
+  challengeId Int                 @map("challenge_id")
+  status      UserChallengeStatus @default(PENDING)
+  submittedAt DateTime?           @map("submitted_at")
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challenge   Challenge           @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+
+  @@map("user_challenge")
+}
+
+model Challenge_Category {
+  id          Int       @id @default(autoincrement())
+  challengeId Int       @map("challenge_id")
+  categoryId  Int       @map("category_id")
+  challenge   Challenge @relation(fields: [challengeId], references: [id])
+  category    Category  @relation(fields: [categoryId], references: [id])
+
+  @@map("challenge_category")
+}
+
+model Badge {
+  id          Int            @id @default(autoincrement())
+  name        String
+  description String?
+  condition   BadgeCondition @default(EXP)
+
+  userBadges User_Badge[]
+
+  @@map("badge")
+}
+
+model User_Badge {
+  id       Int      @id @default(autoincrement())
+  userId   Int      @map("user_id")
+  badgeId  Int      @map("badge_id")
+  earnedAt DateTime @default(now()) @map("earned_date")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge Badge @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  @@map("user_badge")
+}
+
+model User_Proof {
+  id                Int                 @id @default(autoincrement())
+  userId            Int
+  challengeId       Int
+  proofImages       Json                @default("[]")
+  status            String              @default("PENDING")
+  submittedAt       DateTime            @default(now())
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challenge         Challenge           @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  Admin_Proof_Check Admin_Proof_Check[]
+
+  @@map("user_proof")
+}
+
+model Admin_Proof_Check {
+  id        Int              @id @default(autoincrement())
+  proofId   Int              @map("proof_id")
+  adminId   Int?             @map("admin_id")
+  status    ProofCheckStatus @default(PENDING)
+  checkedAt DateTime?        @map("checked_at")
+  proof     User_Proof       @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  admin     User?            @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@map("admin_proof_check")
+}
+
+model Banned_User {
+  id         Int       @id @default(autoincrement())
+  userId     Int       @unique @map("user_id")
+  reason     String?
+  bannedAt   DateTime  @default(now()) @map("banned_at")
+  unbannedAt DateTime? @map("unbanned_at")
+  status     BanStatus @default(BANNED)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("banned_user")
+}
